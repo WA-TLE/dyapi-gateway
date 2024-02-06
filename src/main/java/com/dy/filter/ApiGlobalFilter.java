@@ -1,34 +1,45 @@
 package com.dy.filter;
 
+
 import cn.hutool.core.util.StrUtil;
 import com.dy.utils.SignUtils;
 import lombok.extern.slf4j.Slf4j;
+import org.reactivestreams.Publisher;
 import org.springframework.cloud.gateway.filter.GatewayFilterChain;
 import org.springframework.cloud.gateway.filter.GlobalFilter;
+import org.springframework.context.annotation.Configuration;
 import org.springframework.core.Ordered;
+import org.springframework.core.io.buffer.DataBuffer;
+import org.springframework.core.io.buffer.DataBufferFactory;
+import org.springframework.core.io.buffer.DataBufferUtils;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.HttpStatusCode;
 import org.springframework.http.server.reactive.ServerHttpRequest;
 import org.springframework.http.server.reactive.ServerHttpResponse;
+import org.springframework.http.server.reactive.ServerHttpResponseDecorator;
 import org.springframework.stereotype.Component;
 import org.springframework.util.MultiValueMap;
 import org.springframework.web.server.ServerWebExchange;
+import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
 import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
 
 /**
  * 全局拦截器
+ *
  * @Author: dy
  * @Date: 2024/2/6 20:36
  * @Description:
  */
 @Slf4j
 @Component
-public class ApiGlobalFilter implements GlobalFilter, Ordered  {
+//@Configuration
+public class ApiGlobalFilter implements GlobalFilter, Ordered {
 
     //  定义白名单                                         Arrays.asList("127.0.0.1");
     public static final List<String> IP_WHITE_LIST = List.of("127.0.0.1");
@@ -53,9 +64,6 @@ public class ApiGlobalFilter implements GlobalFilter, Ordered  {
         }
         MultiValueMap<String, String> queryParams = request.getQueryParams();
         log.info("请求参数: {}", queryParams);
-
-
-
 
 
         //  3. （黑白名单）
@@ -83,8 +91,6 @@ public class ApiGlobalFilter implements GlobalFilter, Ordered  {
         if (StrUtil.hasBlank(accessKey, nonce, timestamp, sign, body)) {
             return handleNoAuth(response);
         }
-
-
 
 
         // TODO: 2023/12/22  这里应该是从数据库中取 accessKey 和 secretKey 的, 这里先不照做
@@ -119,27 +125,25 @@ public class ApiGlobalFilter implements GlobalFilter, Ordered  {
         // TODO: 2024/2/6 远程调用, 接口次数加一
 
 
-        Mono<Void> filter = chain.filter(exchange);
-        if (response.getStatusCode() == HttpStatus.OK) {
-            //  7. 响应日志
-            //  8. 调用成功，接口调用次数 + 1
-
-
-        } else {
-            return handleInvokeError(response);
-        }
+//        Mono<Void> filter = chain.filter(exchange);
+//        if (response.getStatusCode() == HttpStatus.OK) {
+//            //  7. 响应日志
+//            //  8. 调用成功，接口调用次数 + 1
+//
+//
+//        } else {
+//            return handleInvokeError(response);
+//        }
 
         //  9. 调用失败，返回一个规范的错误码
 
 
-
-
-        return filter;
+        return handleResponse(exchange, chain);
     }
 
     @Override
     public int getOrder() {
-        return 0;
+        return -1;
     }
 
 
@@ -151,5 +155,54 @@ public class ApiGlobalFilter implements GlobalFilter, Ordered  {
     private Mono<Void> handleInvokeError(ServerHttpResponse response) {
         response.setStatusCode(HttpStatus.INTERNAL_SERVER_ERROR);
         return response.setComplete();
+    }
+
+
+    public Mono<Void> handleResponse(ServerWebExchange exchange, GatewayFilterChain chain) {
+
+        try {
+
+            ServerHttpResponse originalResponse = exchange.getResponse();
+            DataBufferFactory bufferFactory = originalResponse.bufferFactory();
+
+            HttpStatusCode statusCode = originalResponse.getStatusCode();
+
+            if (statusCode == HttpStatus.OK) {
+                ServerHttpResponseDecorator decoratedResponse = new ServerHttpResponseDecorator(originalResponse) {
+                    @Override
+                    public Mono<Void> writeWith(Publisher<? extends DataBuffer> body) {
+                        //log.info("body instanceof Flux: {}", (body instanceof Flux));
+                        if (body instanceof Flux) {
+                            Flux<? extends DataBuffer> fluxBody = Flux.from(body);
+                            //
+                            return super.writeWith(fluxBody.map(dataBuffer -> {
+                                byte[] content = new byte[dataBuffer.readableByteCount()];
+                                dataBuffer.read(content);
+                                DataBufferUtils.release(dataBuffer);//释放掉内存
+                                // 构建日志
+                                StringBuilder sb2 = new StringBuilder(200);
+                                sb2.append("<--- {} {} \n");
+                                List<Object> rspArgs = new ArrayList<>();
+                                rspArgs.add(originalResponse.getStatusCode());
+                                //rspArgs.add(requestUrl);
+                                String data = new String(content, StandardCharsets.UTF_8);//data
+                                sb2.append(data);
+                                log.info(sb2.toString(), rspArgs.toArray());//log.info("<-- {} {}\n", originalResponse.getStatusCode(), data);
+                                return bufferFactory.wrap(content);
+                            }));
+                        } else {
+                            log.error("<--- {} 响应code异常", getStatusCode());
+                        }
+                        return super.writeWith(body);
+                    }
+
+                };
+                return chain.filter(exchange.mutate().response(decoratedResponse).build());
+            }
+            return chain.filter(exchange);//降级处理返回数据
+        } catch (Exception e) {
+            log.error("gateway log exception.\n" + e);
+            return chain.filter(exchange);
+        }
     }
 }
