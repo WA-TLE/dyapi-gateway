@@ -161,47 +161,51 @@ public class ApiGlobalFilter implements GlobalFilter, Ordered {
     public Mono<Void> handleResponse(ServerWebExchange exchange, GatewayFilterChain chain) {
 
         try {
-
             ServerHttpResponse originalResponse = exchange.getResponse();
+            // 缓存数据的工厂
             DataBufferFactory bufferFactory = originalResponse.bufferFactory();
-
+            // 拿到响应码
             HttpStatusCode statusCode = originalResponse.getStatusCode();
-
             if (statusCode == HttpStatus.OK) {
+                // 装饰，增强能力
                 ServerHttpResponseDecorator decoratedResponse = new ServerHttpResponseDecorator(originalResponse) {
+                    // 等调用完转发的接口后才会执行
                     @Override
                     public Mono<Void> writeWith(Publisher<? extends DataBuffer> body) {
-                        //log.info("body instanceof Flux: {}", (body instanceof Flux));
+                        log.info("body instanceof Flux: {}", (body instanceof Flux));
                         if (body instanceof Flux) {
                             Flux<? extends DataBuffer> fluxBody = Flux.from(body);
-                            //
-                            return super.writeWith(fluxBody.map(dataBuffer -> {
-                                byte[] content = new byte[dataBuffer.readableByteCount()];
-                                dataBuffer.read(content);
-                                DataBufferUtils.release(dataBuffer);//释放掉内存
-                                // 构建日志
-                                StringBuilder sb2 = new StringBuilder(200);
-                                sb2.append("<--- {} {} \n");
-                                List<Object> rspArgs = new ArrayList<>();
-                                rspArgs.add(originalResponse.getStatusCode());
-                                //rspArgs.add(requestUrl);
-                                String data = new String(content, StandardCharsets.UTF_8);//data
-                                sb2.append(data);
-                                log.info(sb2.toString(), rspArgs.toArray());//log.info("<-- {} {}\n", originalResponse.getStatusCode(), data);
-                                return bufferFactory.wrap(content);
-                            }));
+                            // 往返回值里写数据
+                            // 拼接字符串
+                            return super.writeWith(
+                                    fluxBody.map(dataBuffer -> {
+                                        // 7. todo 调用成功，接口调用次数 + 1 invokeCount
+                                        byte[] content = new byte[dataBuffer.readableByteCount()];
+                                        dataBuffer.read(content);
+                                        DataBufferUtils.release(dataBuffer);//释放掉内存
+                                        // 构建日志
+                                        StringBuilder sb2 = new StringBuilder(200);
+                                        List<Object> rspArgs = new ArrayList<>();
+                                        rspArgs.add(originalResponse.getStatusCode());
+                                        String data = new String(content, StandardCharsets.UTF_8); //data
+                                        sb2.append(data);
+                                        // 打印日志
+                                        log.info("响应结果：" + data);
+                                        return bufferFactory.wrap(content);
+                                    }));
                         } else {
+                            // 8. 调用失败，返回一个规范的错误码
                             log.error("<--- {} 响应code异常", getStatusCode());
                         }
                         return super.writeWith(body);
                     }
-
                 };
+                // 设置 response 对象为装饰过的
                 return chain.filter(exchange.mutate().response(decoratedResponse).build());
             }
-            return chain.filter(exchange);//降级处理返回数据
+            return chain.filter(exchange); // 降级处理返回数据
         } catch (Exception e) {
-            log.error("gateway log exception.\n" + e);
+            log.error("网关处理响应异常" + e);
             return chain.filter(exchange);
         }
     }
