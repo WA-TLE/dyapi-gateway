@@ -2,12 +2,17 @@ package com.dy.filter;
 
 
 import cn.hutool.core.util.StrUtil;
+import com.dy.common.model.entity.InterfaceInfo;
+import com.dy.common.model.entity.User;
+import com.dy.common.service.InnerInterfaceInfoService;
+import com.dy.common.service.InnerUserInterfaceInfoService;
+import com.dy.common.service.InnerUserService;
 import com.dy.utils.SignUtils;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.dubbo.config.annotation.DubboReference;
 import org.reactivestreams.Publisher;
 import org.springframework.cloud.gateway.filter.GatewayFilterChain;
 import org.springframework.cloud.gateway.filter.GlobalFilter;
-import org.springframework.context.annotation.Configuration;
 import org.springframework.core.Ordered;
 import org.springframework.core.io.buffer.DataBuffer;
 import org.springframework.core.io.buffer.DataBufferFactory;
@@ -44,6 +49,17 @@ public class ApiGlobalFilter implements GlobalFilter, Ordered {
     //  定义白名单                                         Arrays.asList("127.0.0.1");
     public static final List<String> IP_WHITE_LIST = List.of("127.0.0.1");
 
+    public static final String HOST = "http://localhost:8081";
+
+    @DubboReference
+    private InnerUserService innerUserService;
+
+    @DubboReference
+    private InnerInterfaceInfoService innerInterfaceInfoService;
+
+    @DubboReference
+    private InnerUserInterfaceInfoService innerUserInterfaceInfoService;
+
 
     //  1. 用户发送请求到 API 网关    @Override
     public Mono<Void> filter(ServerWebExchange exchange, GatewayFilterChain chain) {
@@ -51,11 +67,19 @@ public class ApiGlobalFilter implements GlobalFilter, Ordered {
         log.info("custom global filter");
         //  2. 请求日志
         //  2.1 获取请求的信息并输出日志
+
+
+
         ServerHttpRequest request = exchange.getRequest();
+
+        String path = HOST + request.getPath().toString();
+        String method = request.getMethod().toString();
+
+
         log.info("请求头唯一标识: {}", request.getId());
         log.info("请求头信息: {}", request.getHeaders());
-        log.info("请求路径 value: {}" + request.getPath().value());
-        log.info("请求路径 toString: {}" + request.getPath().toString());
+        log.info("请求方法: {}", method);
+        log.info("请求路径 value: {}" + path);
         InetSocketAddress remoteAddress = request.getRemoteAddress();
         String sourceAddress = null;
         if (remoteAddress != null) {
@@ -93,10 +117,22 @@ public class ApiGlobalFilter implements GlobalFilter, Ordered {
         }
 
 
-        // TODO: 2023/12/22  这里应该是从数据库中取 accessKey 和 secretKey 的, 这里先不照做
-        if (!accessKey.equals("dingyu")) {
+        User innerUser = null;
+        try {
+            innerUser = innerUserService.getUserByAccessKey(accessKey);
+        } catch (Exception e) {
+            log.error("获取登录用户调用失败: e -> ", e);
+
+            return handleInvokeError(response);
+
+        }
+
+        if (innerUser == null) {
             return handleNoAuth(response);
         }
+
+
+
 
         //  判断随机数是否重复
         if (Long.parseLong(nonce) > 10000) {
@@ -110,19 +146,34 @@ public class ApiGlobalFilter implements GlobalFilter, Ordered {
             return handleNoAuth(response);
         }
 
-        // TODO: 2023/12/22 实际是从数据库中查出的 secretKey
-        String serverSign = SignUtils.getSign(body, "Hello world");
+        //  2023/12/22 实际是从数据库中查出的 secretKey
+        String secretKey = innerUser.getSecretKey();
+        String serverSign = SignUtils.getSign(body, secretKey);
 
-        if (!sign.equals(serverSign)) {
+        if (sign == null || !sign.equals(serverSign)) {
             return handleNoAuth(response);
         }
 
         //  5. 请求的模拟接口是否存在？
         //  5.1 这里需要查询数据库, 不建议在网关写
-        // TODO: 2024/2/6 远程调用, 查询数据库, 判断接口是否存在
+
+
+        InterfaceInfo interfaceInfo = null;
+        try {
+            interfaceInfo = innerInterfaceInfoService.getInterfaceInfo(path, method);
+        } catch (Exception e) {
+            log.error("远程调用查询接口信息失败: e -> ", e);
+
+            return handleInvokeError(response);
+        }
+
+        if (interfaceInfo == null) {
+            return handleNoAuth(response);
+        }
+
 
         //  6. **请求转发，调用模拟接口**
-        // TODO: 2024/2/6 远程调用, 接口次数加一
+
 
 
 //        Mono<Void> filter = chain.filter(exchange);
@@ -138,7 +189,7 @@ public class ApiGlobalFilter implements GlobalFilter, Ordered {
         //  9. 调用失败，返回一个规范的错误码
 
 
-        return handleResponse(exchange, chain);
+        return handleResponse(exchange, chain, interfaceInfo.getId(), innerUser.getId(), response);
     }
 
     @Override
@@ -158,7 +209,7 @@ public class ApiGlobalFilter implements GlobalFilter, Ordered {
     }
 
 
-    public Mono<Void> handleResponse(ServerWebExchange exchange, GatewayFilterChain chain) {
+    public Mono<Void> handleResponse(ServerWebExchange exchange, GatewayFilterChain chain, long interfaceId, long userId, ServerHttpResponse response) {
 
         try {
             ServerHttpResponse originalResponse = exchange.getResponse();
@@ -180,6 +231,16 @@ public class ApiGlobalFilter implements GlobalFilter, Ordered {
                             return super.writeWith(
                                     fluxBody.map(dataBuffer -> {
                                         // 7. todo 调用成功，接口调用次数 + 1 invokeCount
+
+                                        try {
+                                            boolean flag = innerUserInterfaceInfoService.invokeCount(interfaceId, userId);
+                                        } catch (Exception e) {
+                                            log.error("远程调用接口调用测试加一失败: e -> ", e);
+
+
+                                        }
+
+
                                         byte[] content = new byte[dataBuffer.readableByteCount()];
                                         dataBuffer.read(content);
                                         DataBufferUtils.release(dataBuffer);//释放掉内存

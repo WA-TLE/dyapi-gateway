@@ -66,6 +66,12 @@
             <version>2.1.0</version>
         </dependency>
 
+        <dependency>
+            <groupId>com.dy</groupId>
+            <artifactId>dyapi-common</artifactId>
+            <version>0.0.1</version>
+        </dependency>
+
 
 
     </dependencies>
